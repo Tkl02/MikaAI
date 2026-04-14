@@ -1,3 +1,5 @@
 .env
 mika-venv
 __pycache__
+Mika_chrome_db
+temp_audio

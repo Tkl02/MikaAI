@@ -1,51 +1,54 @@
 from loguru import logger
-import json
+import chromadb
 from pathlib import Path
+from datetime import datetime
+import uuid
 
 BASE_DIR = Path(__file__).resolve().parent
 
 class LocalMemoryManager:
     """Gerencia a memória e contexto do usuário no json"""
     def __init__(self):
-        self.file_path = BASE_DIR / "MikaMemory.json"
-        self.data = self.load_data()
+        self.db_path = BASE_DIR / "Mika_chrome_db"
 
-    def load_data(self):
-        if self.file_path.exists() and self.file_path.stat().st_size>0:
-            try:
-                with open(self.file_path, 'r', encoding='utf-8')as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"erro ao ler memoria local {e}")
-        else:
-            logger.warning("Arquivo de memória não encontrado. Um novo será criado ao salvar dados.")
-        return {"preferences":{},"history":[]}
+        try:
+            self.client = chromadb.PersistentClient(path=str(self.db_path))
 
-    def save_preference(self, key, value):
-        self.data["preferences"][key] = value
-        self._sync_to_disk()
-
-    def save_preferenc(self, key, value):
-        self.save_preference(key, value)
+            self.collection = self.client.get_or_create_collection(name="Mika_conversation")
+            logger.info("ChromaDB: Memoria de longo prazo carregada com sucesso")
+        except Exception as erro:
+            logger.error(f"Erro na inicialização de ChromaDB: {erro}")
+        
+        self.short_term_memory = []
     
     def add_history(self, user_text, mika_response):
-        self.data["history"].append({
-            "user": user_text,
-            "mika": mika_response,
-            "timestamp": "2026-04-07"
-        })
+        timestamp = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
+        interactions_id= str(uuid.uuid4())[:5]
 
-        if len(self.data["history"]) > 50:
-            self.data["history"].pop(0)
-        self._sync_to_disk()
-    
-    def _sync_to_disk(self):
+        document = f"Usuario disse:{user_text}\nMika Respondeu: {mika_response}"
+
         try:
-            with open(self.file_path,'w', encoding='utf-8')as f:
-                json.dump(self.data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Erro ao salvar no disco: {e}")
-        
+            self.collection.add(
+                documents=[document],
+                metadatas=[{"timestamp": timestamp}],
+                ids=[interactions_id]
+            )
+        except Exception as erro:
+            logger.error(f"Erro ao salvar memoria longa: {erro}")
+
+        self.short_term_memory.append({"user":user_text, "mika": mika_response})
+        if len(self.short_term_memory)>3:
+            self.short_term_memory.pop(0)
     
-    def get_context(self):
-        return self.data.get("preferences",{})
+    def search_memory(self, query_text, n_results=2):
+        try:
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results
+            )
+            if results and results['documents'] and results['documents'][0]:
+                return results['documents'][0]
+            return []
+        except Exception as erro:
+            logger.error(f"Erro ao buscar memoria: {erro}")
+

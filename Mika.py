@@ -1,7 +1,6 @@
 import os
 import sys
 from pathlib import Path
-from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 from dotenv import load_dotenv
 from loguru import logger
@@ -14,7 +13,6 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 
 if __name__ == "__main__":
-    os.environ["QT_QPA_PLATFORM"] = "wayland"
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
         "--enable-gpu-rasterization --ignore-gpu-blocklist --disable-web-security"
     )
