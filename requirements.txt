@@ -1,0 +1,16 @@
+loguru
+groq
+dotenv
+faster_whisper
+numpy
+sounddevice
+keyboard
+PyQt6 
+PyQt6-WebEngine
+AppOpener
+torch 
+torchaudio
+chromadb
+kokoro
+scipy
+# testar integração da kokoro e reprodução de voz

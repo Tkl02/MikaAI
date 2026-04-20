@@ -41,7 +41,7 @@
 
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20.0);
-        camera.position.set(0.0, 1.4, 1.5); // Focado no busto/rosto
+        camera.position.set(0.0, 1.4, 1.5);
 
         const light = new THREE.DirectionalLight(0xffffff, 1.0);
         light.position.set(1.0, 1.0, 1.0).normalize();
@@ -51,39 +51,94 @@
         const loader = new GLTFLoader();
         loader.register((parser) => new VRMLoaderPlugin(parser));
 
-        // Substitua 'mika.vrm' pelo nome do seu arquivo
-        loader.load('./BaseModel.vrm', (gltf) => {
+        loader.load('./Mika-0.vrm', (gltf) => {
             const vrm = gltf.userData.vrm;
             scene.add(vrm.scene);
             currentVrm = vrm;
-            vrm.scene.rotation.y = 0; // Vira para a câmera
+            vrm.scene.rotation.y = Math.PI;
+            const leftArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+            const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+
+            if (leftArm) {
+                leftArm.rotation.z = 1.3;
+            }
+            if (rightArm) {
+                rightArm.rotation.z = -1.3;
+            }
             console.log("VRM Carregado!");
         });
 
-        // Função global que o Python vai chamar
+        // Controle de Expressões
         window.changeMikaExpression = (state) => {
             if (!currentVrm) return;
             const s = currentVrm.expressionManager;
-
-            // Reseta expressões
             s.setValue(VRMExpressionPresetName.Joy, 0);
             s.setValue(VRMExpressionPresetName.Angry, 0);
             s.setValue(VRMExpressionPresetName.Sorrow, 0);
 
-            // Aplica a nova
             if (state === 'happy') s.setValue(VRMExpressionPresetName.Joy, 1);
             if (state === 'angry') s.setValue(VRMExpressionPresetName.Angry, 1);
             if (state === 'sad') s.setValue(VRMExpressionPresetName.Sorrow, 1);
         };
 
+        // --- NOVO: Controle de Fala ---
+        let isTalking = false;
+        let talkTimer = 0;
+
+        window.startTalking = () => { isTalking = true; };
+        window.stopTalking = () => {
+            isTalking = false;
+            if (currentVrm) {
+                // Fecha a boca ao parar de falar
+                currentVrm.expressionManager.setValue(VRMExpressionPresetName.Aa, 0);
+                currentVrm.expressionManager.setValue(VRMExpressionPresetName.Ih, 0);
+                currentVrm.expressionManager.setValue(VRMExpressionPresetName.Ou, 0);
+            }
+        };
+
         const clock = new THREE.Clock();
+
         function animate() {
             requestAnimationFrame(animate);
             const delta = clock.getDelta();
+
             if (currentVrm) {
                 currentVrm.update(delta);
-                // Animação básica de "respirar"
-                currentVrm.scene.position.y = Math.sin(Date.now() * 0.002) * 0.005;
+                const time = Date.now();
+                const s = currentVrm.expressionManager;
+
+                // 1. Movimento Ocioso (Idle Sway) - Cabeça e Pescoço respirando
+                const neck = currentVrm.humanoid.getNormalizedBoneNode('neck');
+                const spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
+                if (neck && spine) {
+                    neck.rotation.x = Math.sin(time * 0.001) * 0.02; // Move a cabeça pra cima/baixo
+                    neck.rotation.y = Math.cos(time * 0.0008) * 0.03; // Olha levemente pros lados
+                    spine.rotation.z = Math.sin(time * 0.0005) * 0.01; // Balanço do tronco
+                }
+
+                // 2. Sistema de Piscar Olhos (Blink Automático)
+                const blinkFreq = 4000; // Pisca a cada ~4 segundos
+                const blinkDuration = 150; // Velocidade da piscada
+                const timeMod = time % blinkFreq;
+                if (timeMod < blinkDuration) {
+                    const blinkValue = Math.sin((timeMod / blinkDuration) * Math.PI);
+                    s.setValue(VRMExpressionPresetName.Blink, blinkValue);
+                } else {
+                    s.setValue(VRMExpressionPresetName.Blink, 0);
+                }
+                // 3. Simulação de Fala (Lip Sync Aleatório)
+                if (isTalking) {
+                    talkTimer += delta;
+                    if (talkTimer > 0.08) { // Muda o formato da boca a cada 80ms
+                        talkTimer = 0;
+                        const vowels = [VRMExpressionPresetName.Aa, VRMExpressionPresetName.Ih, VRMExpressionPresetName.Ou];
+                        // Zera todas
+                        vowels.forEach(v => s.setValue(v, 0));
+                        // Escolhe uma vogal aleatória e aplica uma força aleatória
+                        const randVowel = vowels[Math.floor(Math.random() * vowels.length)];
+                        s.setValue(randVowel, Math.random() * 0.6 + 0.2);
+                    }
+                }
             }
             renderer.render(scene, camera);
         }

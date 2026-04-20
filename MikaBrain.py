@@ -6,49 +6,58 @@ import uuid
 import os
 from loguru import logger
 import shlex
-import pygame
-from MikaVoice import AUDIO_AVAILABLE
 import asyncio
 import numpy as np 
 import sounddevice as sd
 import scipy.io.wavfile as wav
 import threading
-import edge_tts
 import keyboard 
 import re
-import subprocess
 from pathlib import Path
+import subprocess
 import time
 from AppOpener import open as open_app
+import queue
+from kokoro import KPipeline
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 load_dotenv()
-
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 class MikaBrain(QThread):
+    #animação
     change_anim = pyqtSignal(str)
     finished_speaking = pyqtSignal()
+    change_talking_state = pyqtSignal(bool)
 
     def __init__(self, windows_ref):
         super().__init__()
-        self._run_flag = True
-        self.window = windows_ref
+        self._run_flag = True 
+        self.window = windows_ref 
         self.memory = LocalMemoryManager()
         self.client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-        self.audio_available = AUDIO_AVAILABLE
         self.recording_data = []
         self.is_recording = False
         self.is_speaking = False
         self.fs = 16000
-        self.system_prompt = self.load_context_file()
+        self.system_prompt = self.load_context_file() 
         self.comando_pendente = None
-        
-        # Gerenciamento de diretório temporário
+
         self.temp_dir = Path(__file__).resolve().parent / "temp_audio"
         self.ensure_temp_dir()
         self.cleanup_temp_files()
         
-        logger.info("MikaBrain inicializado com sucesso (Groq Mode)")
+        logger.info("Carregando modelo Kokoro")
+        self.tts_pipeline = KPipeline(lang_code='p')
+        self.audio_queue = queue.Queue()
+        
+        self.playback_thread = threading.Thread(target=self.audio_player_worker, daemon=True)
+        self.playback_thread.start()
+        
+        logger.info("MikaBrain inicializado com sucesso")
         
     def load_context_file(self):
         try:
@@ -80,22 +89,32 @@ class MikaBrain(QThread):
     
     def stop(self):
         self._run_flag = False
+        self.audio_queue.put(None)
     
-    def stop_mika_voice(self):
-        if pygame.mixer.music.get_busy():
-            pygame.mixer.music.stop()
-            pygame.mixer.music.unload()
-            self.is_speaking = False
-            logger.info("Mika: Áudio interrompido")
-    
+    def audio_player_worker(self):
+        while True:
+            audio_data = self.audio_queue.get()
+            if audio_data is None:
+                logger.info("Thread de áudio encerrada com segurança.")
+                break
+            audio_array, sr = audio_data
+
+            self.change_talking_state.emit(True)
+            sd.play(audio_array, sr)
+            sd.wait()
+            self.change_talking_state.emit(False)
+            self.audio_queue.task_done()
+
     def listen_windows(self):
         try:
             keyboard.on_press_key('F9', self.handle_key_press)
             keyboard.on_release_key('F9', self.handle_key_release)
             while self._run_flag:
-                self.msleep(100)
+                time.sleep(0.1)
         except Exception as e:
             logger.error(f"Erro no teclado: {e}")
+        finally:
+            keyboard.unhook_all()
 
     def handle_key_press(self, event):
         if not self.is_recording:
@@ -109,6 +128,18 @@ class MikaBrain(QThread):
     def audio_callback(self, indata, frames, time, status):
         if self.is_recording:
             self.recording_data.append(indata.copy())
+    
+    def stop_mika_voice(self):
+        with self.audio_queue.mutex:
+            self.audio_queue.queue.clear()
+        
+        sd.stop()
+        self.is_speaking=False
+
+        self.change_anim.emit("neutral")
+        self.change_talking_state.emit(False)
+
+        logger.info("Mika: Fala interrompida pelo usuario")
     
     def handle_key_release(self, event):
         if self.is_recording:
@@ -184,9 +215,9 @@ class MikaBrain(QThread):
 
             if lembramcas:
                 contexto_passado = "\n".join(lembramcas)
-                msg_contexto = f"[LEMBRAÇAS RELEVANTES DO PASSADO]:\n{contexto_passado}\nUser essa lembramças se forem uteis para o contexto atual"
+                msg_contexto = f"[LEMBRANÇAS RELEVANTES DO PASSADO]:\n{contexto_passado}\nUser essa lembranças se forem uteis para o contexto atual"
                 messages_list.append({"role":"system","content":msg_contexto})
-                logger.info("Memoria antega resgatada e injetada no prompt")
+                logger.info("Memoria antiga resgatada e injetada no prompt")
 
             for interacao in self.memory.short_term_memory:
                 if isinstance(interacao, dict):
@@ -197,63 +228,68 @@ class MikaBrain(QThread):
             
             chat_compilation = self.client.chat.completions.create(
                 messages=messages_list,
-                model=MODELO_ATUAL
+                model=MODELO_ATUAL,
+                stream=True
             )
-            response = chat_compilation.choices[0].message.content
+
+            self.is_speaking=True
+            self.change_anim.emit("happy")
+
+            texto_completo = ""
+            sentenca_buffer = ""
+
+            for chunk in chat_compilation:
+                if chunk.choices[0].delta.content:
+                    pedaco = chunk.choices[0].delta.content
+                    texto_completo += pedaco
+                    sentenca_buffer += pedaco
+
+                    if "[[" in sentenca_buffer:
+                        if "]]" in sentenca_buffer:
+                            sentenca_buffer = re.sub(r'\[\[.*?\]\]', '', sentenca_buffer, flags=re.DOTALL)
+                        continue
+
+                    if any(p in sentenca_buffer for p in ['.','!','?','\n']):
+                        frase_limmpa = sentenca_buffer.strip()
+                        if len(frase_limmpa) >2:
+                            generator = self.tts_pipeline(frase_limmpa, voice='pf_dora',speed=1.0)
+                            for _, _, audio in generator:
+                                self.audio_queue.put((audio, 24000))
+                        sentenca_buffer=""
             
-            # Regex robusto para capturar comandos (incluindo quebras de linha)
-            command_match = re.search(r'\[\[EXEC:\s*(.+?)\]\]', response, re.DOTALL)
-            open_match = re.search(r'\[\[OPEN:\s*(.+?)\]\]', response, re.DOTALL)
+            if len(sentenca_buffer.strip()) > 2 and not "[[" in sentenca_buffer:
+                generator=self.tts_pipeline(sentenca_buffer.strip(), voice='pf_dora',speed=1.0)
+                for _,_,audio in generator:
+                    self.audio_queue.put((audio,24000))
             
-            command_to_exec = None
-            app_to_open = None
+            logger.info(f"Mika: {texto_completo}")
+            self.memory.add_history(text_input, texto_completo)
+            self.audio_queue.join()
+
+            self.is_speaking=False
+            self.change_anim.emit("neutral")
+
+            command_match = re.search(r'\[\[EXEC:\s*(.+?)\]\]', texto_completo, re.DOTALL)
+            open_match = re.search(r'\[\[OPEN:\s*(.+?)\]\]', texto_completo, re.DOTALL)
 
             if command_match:
                 command_raw = command_match.group(1).strip()
                 cmd_base = command_raw.split()[0].lower() if command_raw else ""
-                response = re.sub(r'\[\[EXEC:\s*.+?\]\]', '', response, flags=re.DOTALL).strip()
 
                 if cmd_base in ["remove-item", "rm", "del", "rmdir"]:
                     self.comando_pendente = command_raw
-                    response += " Notei que isso vai apagar arquivos. Tem certeza?"
                 else:
-                    command_to_exec = command_raw
+                    self.exec_command_powershell(command_raw)
             
             if open_match:
                 app_to_open = open_match.group(1).strip()
-                response = re.sub(r'\[\[OPEN:\s*.+?\]\]', '', response, flags=re.DOTALL).strip()
-
-            logger.info(f"Mika: {response}")
-            self.memory.add_history(text_input, response)
-
-            # Geração de áudio com correção de tipo (Path object)
-            temp_res = self.temp_dir / f"mika_{uuid.uuid4().hex[:8]}.mp3"
-            communicate = edge_tts.Communicate(response, "pt-BR-FranciscaNeural")
-            await communicate.save(str(temp_res))
-
-            if temp_res.exists():
-                pygame.mixer.music.load(str(temp_res))
-                pygame.mixer.music.play()
-                self.is_speaking = True
-                self.change_anim.emit("happy") # Ativa animação
-
-                if command_to_exec:
-                    self.exec_command_powershell(command_to_exec)
-                
-                if app_to_open:
-                    self.abrir_aplicativo(app_to_open)
-                
-                while pygame.mixer.music.get_busy():
-                    await asyncio.sleep(0.1)
-
-                pygame.mixer.music.unload()
-                self.change_anim.emit("neutral") # Volta ao normal
-                self.safe_delete(str(temp_res))
+                self.abrir_aplicativo(app_to_open)
 
         except Exception as e:
             logger.error(f"Erro no pensamento: {e}")
         finally:
             self.is_speaking = False
+            self.change_anim.emit("neutral")
 
     def exec_command_powershell(self, command):
         if not command:
@@ -266,7 +302,6 @@ class MikaBrain(QThread):
 
         cmd_base = parts[0].lower()
 
-        # normaliza aliases comuns do PowerShell
         aliases = {
             "ls": "get-childitem",
             "dir": "get-childitem",
@@ -310,19 +345,3 @@ class MikaBrain(QThread):
 
         except Exception as e:
             logger.error(f"Erro subprocesso: {e}")
-
-class AIAgentWorker(QThread):
-    change_animation = pyqtSignal(str)
-
-    def __init__(self):
-        super().__init__()
-        self.stop_signal = False
-
-    def run(self):
-        logger.info("MikaAI: Motor de lógica iniciado...")
-        while not self.stop_signal:
-            self.msleep(5000)
-        logger.info("Worker parado")
-
-    def stop(self):
-        self.stop_signal = True

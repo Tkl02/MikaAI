@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 from PyQt6.QtWidgets import QApplication
 from dotenv import load_dotenv
-from loguru import logger
 from MikaBrain import MikaBrain, AIAgentWorker
 from MikaWindows import MikaWindows
 
