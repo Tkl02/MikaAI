@@ -1,11 +1,12 @@
 from PyQt6.QtCore import QThread, pyqtSignal
-from LocalMemoryManager import LocalMemoryManager
+from .SystemManager import SystemManager
+from .LocalMemoryManager import LocalMemoryManager
+from .MacroManager import MacroManager
 from groq import Groq
 from dotenv import load_dotenv
 import uuid
 import os
 from loguru import logger
-import shlex
 import asyncio
 import numpy as np 
 import sounddevice as sd
@@ -14,11 +15,10 @@ import threading
 import keyboard 
 import re
 from pathlib import Path
-import subprocess
 import time
-from AppOpener import open as open_app
 import queue
-from kokoro import KPipeline
+import pygame
+import edge_tts
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -28,11 +28,9 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 class MikaBrain(QThread):
-    #animação
     change_anim = pyqtSignal(str)
     finished_speaking = pyqtSignal()
     change_talking_state = pyqtSignal(bool)
-
     def __init__(self, windows_ref):
         super().__init__()
         self._run_flag = True 
@@ -45,23 +43,28 @@ class MikaBrain(QThread):
         self.fs = 16000
         self.system_prompt = self.load_context_file() 
         self.comando_pendente = None
+        self.sys_manager = SystemManager()
+        self.macro_manager = MacroManager(self)
 
         self.temp_dir = Path(__file__).resolve().parent / "temp_audio"
         self.ensure_temp_dir()
         self.cleanup_temp_files()
         
-        logger.info("Carregando modelo Kokoro")
-        self.tts_pipeline = KPipeline(lang_code='p')
-        self.audio_queue = queue.Queue()
+        # Inicializa o Pygame Mixer
+        pygame.mixer.init()
         
+        # Fila de áudio para o Edge TTS
+        self.audio_queue = queue.Queue()
         self.playback_thread = threading.Thread(target=self.audio_player_worker, daemon=True)
         self.playback_thread.start()
         
-        logger.info("MikaBrain inicializado com sucesso")
+        logger.info("MikaBrain inicializado com sucesso (Edge TTS: Ava Multilingual)")
         
     def load_context_file(self):
         try:
-            with open("context.txt", "r", encoding="utf-8") as f:
+            base_path = Path(__file__).resolve().parent
+            context_path = base_path / "context.txt"
+            with open(context_path, "r", encoding="utf-8") as f:
                 return f.read().strip()
         except Exception as erro:
             logger.error(f"Erro na leitura do context: {erro}")
@@ -92,29 +95,57 @@ class MikaBrain(QThread):
         self.audio_queue.put(None)
     
     def audio_player_worker(self):
+        """Thread separada que toca a fila de áudios em MP3"""
         while True:
-            audio_data = self.audio_queue.get()
-            if audio_data is None:
+            filepath = self.audio_queue.get()
+            if filepath is None:
                 logger.info("Thread de áudio encerrada com segurança.")
                 break
-            audio_array, sr = audio_data
 
-            self.change_talking_state.emit(True)
-            sd.play(audio_array, sr)
-            sd.wait()
-            self.change_talking_state.emit(False)
+            self.change_talking_state.emit(True) 
+            
+            try:
+                # Toca a voz usando um Canal (não afeta a música de fundo)
+                som = pygame.mixer.Sound(filepath)
+                canal = pygame.mixer.find_channel()
+                if canal:
+                    canal.play(som)
+                    while canal.get_busy():
+                        time.sleep(0.05)
+            except Exception as e:
+                logger.error(f"Erro ao reproduzir fala: {e}")
+            
+            self.change_talking_state.emit(False) 
+            
+            # Limpeza do temp
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except:
+                pass
+
             self.audio_queue.task_done()
+
+    async def generate_and_queue_tts(self, text):
+        """Gera o áudio com Edge TTS e adiciona na fila de reprodução"""
+        try:
+            temp_mp3 = self.temp_dir / f"tts_{uuid.uuid4().hex[:8]}.mp3"
+            communicate = edge_tts.Communicate(text, "en-US-AvaMultilingualNeural")
+            await communicate.save(str(temp_mp3))
+            self.audio_queue.put(str(temp_mp3))
+        except Exception as e:
+            logger.error(f"Erro ao gerar Edge TTS: {e}")
 
     def listen_windows(self):
         try:
             keyboard.on_press_key('F9', self.handle_key_press)
             keyboard.on_release_key('F9', self.handle_key_release)
             while self._run_flag:
-                time.sleep(0.1)
+                time.sleep(0.1) 
         except Exception as e:
             logger.error(f"Erro no teclado: {e}")
         finally:
-            keyboard.unhook_all()
+            keyboard.unhook_all() 
 
     def handle_key_press(self, event):
         if not self.is_recording:
@@ -131,14 +162,24 @@ class MikaBrain(QThread):
     
     def stop_mika_voice(self):
         with self.audio_queue.mutex:
+            for filepath in list(self.audio_queue.queue):
+                if filepath and isinstance(filepath, str) and os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except:
+                        pass
             self.audio_queue.queue.clear()
         
+        # Para apenas a voz da Mika (Channels), preservando a música de fundo
+        for i in range(pygame.mixer.get_num_channels()):
+            pygame.mixer.Channel(i).stop()
+
         sd.stop()
         self.is_speaking=False
-
+        
         self.change_anim.emit("neutral")
-        self.change_talking_state.emit(False)
-
+        self.change_talking_state.emit(False) 
+        
         logger.info("Mika: Fala interrompida pelo usuario")
     
     def handle_key_release(self, event):
@@ -173,7 +214,12 @@ class MikaBrain(QThread):
             if len(user_text) < 2: return
 
             logger.info(f"Você: {user_text}")
-            await self.think_and_speak(user_text)
+
+            macro_execution = await self.macro_manager.text_process(user_text)
+
+            if not macro_execution:
+                await self.think_and_speak(user_text)
+
             self.safe_delete(audio_path)
 
         except Exception as e:
@@ -187,15 +233,6 @@ class MikaBrain(QThread):
                 return
             except:
                 time.sleep(0.2)
-    
-    def abrir_aplicativo(self, app_name):
-        app_name_lower = app_name.lower()
-        logger.info(f"Abrindo app: {app_name_lower}")
-        try:
-            open_app(app_name_lower, match_closest=True)
-            logger.info(f"Sinal de abertura enviado: {app_name_lower}")
-        except Exception as e:
-            logger.error(f"Erro na abertura do app: '{app_name_lower}' erro: {e}")
 
     async def think_and_speak(self, text_input: str):
         MODELO_ATUAL = "llama-3.1-8b-instant" 
@@ -215,9 +252,8 @@ class MikaBrain(QThread):
 
             if lembramcas:
                 contexto_passado = "\n".join(lembramcas)
-                msg_contexto = f"[LEMBRANÇAS RELEVANTES DO PASSADO]:\n{contexto_passado}\nUser essa lembranças se forem uteis para o contexto atual"
+                msg_contexto = f"[LEMBRANÇAS RELEVANTES DO PASSADO]:\n{contexto_passado}\nUse essas lembranças se forem uteis para o contexto atual"
                 messages_list.append({"role":"system","content":msg_contexto})
-                logger.info("Memoria antiga resgatada e injetada no prompt")
 
             for interacao in self.memory.short_term_memory:
                 if isinstance(interacao, dict):
@@ -249,18 +285,15 @@ class MikaBrain(QThread):
                             sentenca_buffer = re.sub(r'\[\[.*?\]\]', '', sentenca_buffer, flags=re.DOTALL)
                         continue
 
+                    # Gera o áudio instantaneamente a cada ponto de parada da frase
                     if any(p in sentenca_buffer for p in ['.','!','?','\n']):
-                        frase_limmpa = sentenca_buffer.strip()
-                        if len(frase_limmpa) >2:
-                            generator = self.tts_pipeline(frase_limmpa, voice='pf_dora',speed=1.0)
-                            for _, _, audio in generator:
-                                self.audio_queue.put((audio, 24000))
+                        frase_limpa = sentenca_buffer.strip()
+                        if len(frase_limpa) > 2:
+                            await self.generate_and_queue_tts(frase_limpa)
                         sentenca_buffer=""
             
             if len(sentenca_buffer.strip()) > 2 and not "[[" in sentenca_buffer:
-                generator=self.tts_pipeline(sentenca_buffer.strip(), voice='pf_dora',speed=1.0)
-                for _,_,audio in generator:
-                    self.audio_queue.put((audio,24000))
+                await self.generate_and_queue_tts(sentenca_buffer.strip())
             
             logger.info(f"Mika: {texto_completo}")
             self.memory.add_history(text_input, texto_completo)
@@ -279,69 +312,14 @@ class MikaBrain(QThread):
                 if cmd_base in ["remove-item", "rm", "del", "rmdir"]:
                     self.comando_pendente = command_raw
                 else:
-                    self.exec_command_powershell(command_raw)
+                    self.sys_manager.exec_comando_powershell(command_raw)
             
             if open_match:
                 app_to_open = open_match.group(1).strip()
-                self.abrir_aplicativo(app_to_open)
+                self.sys_manager.open_apps(app_to_open)
 
         except Exception as e:
             logger.error(f"Erro no pensamento: {e}")
         finally:
             self.is_speaking = False
             self.change_anim.emit("neutral")
-
-    def exec_command_powershell(self, command):
-        if not command:
-            return
-
-        try:
-            parts = shlex.split(command, posix=False)
-        except Exception:
-            parts = command.split()
-
-        cmd_base = parts[0].lower()
-
-        aliases = {
-            "ls": "get-childitem",
-            "dir": "get-childitem",
-            "mkdir": "new-item",
-            "rm": "remove-item",
-            "del": "remove-item",
-            "echo": "write-output",
-            "cd": "set-location",
-            "start": "start-process"
-        }
-
-        cmd_base = aliases.get(cmd_base, cmd_base)
-
-        allowed = {
-            "new-item",
-            "get-childitem",
-            "remove-item",
-            "set-location",
-            "write-output",
-            "start-process"
-        }
-
-        if cmd_base not in allowed:
-            logger.warning(f"Comando bloqueado: {cmd_base}")
-            return
-
-        logger.info(f"PowerShell executado: {command}")
-
-        try:
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", command],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-
-            if result.returncode == 0:
-                logger.info(f"Sucesso: {result.stdout.strip()}")
-            else:
-                logger.error(f"Erro PS: {result.stderr.strip()}")
-
-        except Exception as e:
-            logger.error(f"Erro subprocesso: {e}")

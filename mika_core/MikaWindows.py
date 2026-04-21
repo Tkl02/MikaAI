@@ -1,7 +1,7 @@
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from LocalMemoryManager import LocalMemoryManager
+from mika_core.LocalMemoryManager import LocalMemoryManager
 from loguru import logger
 from pathlib import Path
 

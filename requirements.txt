@@ -11,6 +11,7 @@ AppOpener
 torch 
 torchaudio
 chromadb
-kokoro
 scipy
-# testar integração da kokoro e reprodução de voz
+pygame
+requests
+edge-tts

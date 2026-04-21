@@ -1,13 +1,12 @@
 import sys
 import os
 import importlib
-import MikaBrain
-from pathlib import Path
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, pyqtSlot
+from PyQt6.QtCore import pyqtSignal, QObject, pyqtSlot
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit, QLabel)
-from PyQt6.QtGui import QColor, QPalette, QFont, QTextCursor
+from PyQt6.QtGui import QTextCursor
 from loguru import logger
-from MikaWindows import MikaWindows
+from mika_core.MikaWindows import MikaWindows
+from mika_core import MikaBrain
 
 NEON_MAGENTA = "#ff00ff"
 NEON_CYAN = "#00ffff"
