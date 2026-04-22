@@ -9,6 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
 
 class MikaWindows(QMainWindow):
+    # classe que mostra a janela do VRM da mika simulando um "webBrowser"
     def __init__(self):
         super().__init__()
         self.memory_manager = LocalMemoryManager()

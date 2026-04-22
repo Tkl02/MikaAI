@@ -1,24 +1,26 @@
+import io
+import queue
+import threading
+import asyncio
+import time
+import re
+import uuid
+import os
+import pygame
+import edge_tts
+from pathlib import Path
+from loguru import logger
 from PyQt6.QtCore import QThread, pyqtSignal
 from .SystemManager import SystemManager
 from .LocalMemoryManager import LocalMemoryManager
 from .MacroManager import MacroManager
 from groq import Groq
 from dotenv import load_dotenv
-import uuid
-import os
-from loguru import logger
-import asyncio
-import numpy as np 
 import sounddevice as sd
 import scipy.io.wavfile as wav
-import threading
-import keyboard 
-import re
-from pathlib import Path
-import time
-import queue
-import pygame
-import edge_tts
+import numpy as np
+import keyboard
+
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)

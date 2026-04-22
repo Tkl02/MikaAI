@@ -8,13 +8,14 @@ import locale
 BASE_DIR = Path(__file__).resolve().parent
 
 class MacroManager:
+    #localização da personlizações de macors da mika.
+    #funçao principal para chamada de macros.
     locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
     def __init__(self, brain_ref):
         self.brain = brain_ref
     
         self.macros_avaiabilits = {
-            "acorda crianças": self.macro_welcome,
-            "acorda criança": self.macro_welcome,
+            "iniciar protocolo": self.macro_welcome,
             "papai chegou": self.macro_welcome
         }
 
@@ -30,8 +31,8 @@ class MacroManager:
 
     # ===============|
     # FUNÇÕES MACROS |
-    # ===============|
-
+    # ===============V
+# welcome macro function________________________________________________________________________________________________________
     def get_weather(self):
         try:
             url = "https://api.open-meteo.com/v1/forecast?latitude=-23.5489&longitude=-46.6388&current_weather=true"
@@ -75,3 +76,4 @@ class MacroManager:
         self.brain.change_anim.emit("happy")
         await self.brain.generate_and_queue_tts(texto_boas_vindas)
         self.brain.memory.add_history("Macro de ativação executada", texto_boas_vindas)
+#_________________________________________________________________________________________________________________________

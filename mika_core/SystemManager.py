@@ -6,6 +6,7 @@ from AppOpener import open as open_app
 
 class SystemManager:
     # Classe responsavel por interagir com o sistema operacional do usuario
+    # comandos powershell e abertura de apps.
     def __init__(self):
         self.allower_powershell_commands = {
           "new-item", "get-childitem", "remove-item", 
