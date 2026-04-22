@@ -97,36 +97,56 @@ class MikaBrain(QThread):
         self.audio_queue.put(None)
     
     def audio_player_worker(self):
-        """Thread separada que toca a fila de áudios em MP3"""
+        """Thread separada que toca a fila de áudios em MP3 sem GAPs"""
+        
+        # Reservamos um canal específico para a voz da Mika.
+        # A música da macro já usa o mixer.music, então não haverá conflito.
+        canal = pygame.mixer.Channel(1) 
+        
         while True:
-            filepath = self.audio_queue.get()
-            if filepath is None:
-                logger.info("Thread de áudio encerrada com segurança.")
-                break
-
-            self.change_talking_state.emit(True) 
-            
             try:
-                # Toca a voz usando um Canal (não afeta a música de fundo)
-                som = pygame.mixer.Sound(filepath)
-                canal = pygame.mixer.find_channel()
-                if canal:
-                    canal.play(som)
-                    while canal.get_busy():
-                        time.sleep(0.05)
-            except Exception as e:
-                logger.error(f"Erro ao reproduzir fala: {e}")
-            
-            self.change_talking_state.emit(False) 
-            
-            # Limpeza do temp
-            try:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            except:
-                pass
+                # Usamos um timeout de 100ms. Se não tiver nada na fila, 
+                # ele cai na exceção e verifica se precisa fechar a boca do VRM.
+                filepath = self.audio_queue.get(timeout=0.1)
+                
+                if filepath is None:
+                    logger.info("Thread de áudio encerrada com segurança.")
+                    break
 
-            self.audio_queue.task_done()
+                self.change_talking_state.emit(True) 
+                
+                try:
+                    # Ao instanciar o Sound, o Pygame joga o áudio inteiro para a RAM.
+                    som = pygame.mixer.Sound(filepath)
+                    
+                    if not canal.get_busy():
+                        # Se não tem nada tocando, inicia imediatamente
+                        canal.play(som) 
+                    else:
+                        # Se já estiver tocando, esperamos até o "slot" de engatilhamento liberar.
+                        # O get_queue() retorna True se já existe um áudio na espera.
+                        while canal.get_queue():
+                            time.sleep(0.01)
+                            
+                        # Enfileira nativamente: a transição será feita em 0ms (gap zero!)
+                        canal.queue(som)
+                        
+                except Exception as e:
+                    logger.error(f"Erro ao reproduzir fala: {e}")
+                
+                # Como o Sound já está na RAM, podemos deletar o arquivo do disco imediatamente.
+                try:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                except:
+                    pass
+
+                self.audio_queue.task_done()
+
+            except queue.Empty:
+                # Se a fila esvaziou e o canal parou de tocar, a Mika parou de falar.
+                if not canal.get_busy():
+                    self.change_talking_state.emit(False)
 
     async def generate_and_queue_tts(self, text):
         """Gera o áudio com Edge TTS e adiciona na fila de reprodução"""
@@ -236,6 +256,25 @@ class MikaBrain(QThread):
             except:
                 time.sleep(0.2)
 
+    def run_winget_with_notification(self, command, app_name, action_type="instalando"):
+            def background_task():
+                logger.info(f"MikaBrain: iniciando {action_type} do app {app_name}")
+
+                sucesso = self.sys_manager.exec_comando_powershell(command)
+
+                if sucesso:
+                    msg_final = f"Ei, terminei de {action_type} o app {app_name} para você!"
+                    if action_type == "desinstalando":
+                        msg_final = f"Prontinho, o {app_name} foi removido com sucesso"
+                else:
+                    verbo = "instalar" if action_type == "instalado" else "desinstalar"
+                    msg_final = f"Poxa, não consegui {verbo} esse app. Ocorreu um erro no sistema."
+                
+                asyncio.run(self.generate_and_queue_tts(msg_final))
+                logger.info(f"MikaBrain: Notificação de {action_type} enviada")
+            
+            threading.Thread(target=background_task, daemon=True).start()
+
     async def think_and_speak(self, text_input: str):
         MODELO_ATUAL = "llama-3.1-8b-instant" 
         
@@ -276,6 +315,18 @@ class MikaBrain(QThread):
             texto_completo = ""
             sentenca_buffer = ""
 
+            text_queue = asyncio.Queue()
+
+            async def tts_worker():
+                while True:
+                    texto = await text_queue.get()
+                    if texto is None:
+                        break
+                    await self.generate_and_queue_tts(texto)
+                    text_queue.task_done()
+                
+            worker_task = asyncio.create_task(tts_worker())
+
             for chunk in chat_compilation:
                 if chunk.choices[0].delta.content:
                     pedaco = chunk.choices[0].delta.content
@@ -286,16 +337,23 @@ class MikaBrain(QThread):
                         if "]]" in sentenca_buffer:
                             sentenca_buffer = re.sub(r'\[\[.*?\]\]', '', sentenca_buffer, flags=re.DOTALL)
                         continue
+                    
+                    if any (p in sentenca_buffer for p in ['.', '!', '?', '\n']):
+                        partes = re.split(r'([.!?\n])', sentenca_buffer,1)
+                        if len(partes)>1:
+                            frase = (partes[0]+partes[1].strip())
+                            resto = partes[2]if len(partes)> 2 else ""
 
-                    # Gera o áudio instantaneamente a cada ponto de parada da frase
-                    if any(p in sentenca_buffer for p in ['.','!','?','\n']):
-                        frase_limpa = sentenca_buffer.strip()
-                        if len(frase_limpa) > 2:
-                            await self.generate_and_queue_tts(frase_limpa)
-                        sentenca_buffer=""
+                            if len(frase)>2:
+                                text_queue.put_nowait(frase)
+                            
+                            sentenca_buffer = resto
             
             if len(sentenca_buffer.strip()) > 2 and not "[[" in sentenca_buffer:
                 await self.generate_and_queue_tts(sentenca_buffer.strip())
+
+            text_queue.put_nowait(None)
+            await worker_task
             
             logger.info(f"Mika: {texto_completo}")
             self.memory.add_history(text_input, texto_completo)
@@ -311,8 +369,23 @@ class MikaBrain(QThread):
                 command_raw = command_match.group(1).strip()
                 cmd_base = command_raw.split()[0].lower() if command_raw else ""
 
-                if cmd_base in ["remove-item", "rm", "del", "rmdir"]:
+                # Isola a lógica do winget
+                if cmd_base == "winget":
+                    app_name = "aplicativo"
+                    if '"' in command_raw:
+                        app_name = command_raw.split('"')[1]
+                    else:
+                        partes = command_raw.split()
+                        if len(partes) > 2: app_name = partes[2]
+                        
+                    acao = "desinstalado" if "uninstall" in command_raw.lower() else "instalado"
+                    self.run_winget_with_notification(command_raw, app_name, acao)
+                
+                # Comandos destrutivos
+                elif cmd_base in ["remove-item", "rm", "del", "rmdir"]:
                     self.comando_pendente = command_raw
+                
+                # Outros comandos PowerShell
                 else:
                     self.sys_manager.exec_comando_powershell(command_raw)
             
@@ -325,3 +398,4 @@ class MikaBrain(QThread):
         finally:
             self.is_speaking = False
             self.change_anim.emit("neutral")
+        

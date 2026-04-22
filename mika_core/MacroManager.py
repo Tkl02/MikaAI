@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime
 from loguru import logger
 import locale
+import asyncio
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -57,23 +58,26 @@ class MacroManager:
                 logger.error(f"Erro ao tocar MP3: {e}")
         else:
             logger.warning(f"Música não encontrada em: {musica_path}")
+        
+        self.brain.change_anim.emit("happy")
+        await self.brain.generate_and_queue_tts("Bem vindo senhor.")
 
-        # 2. Prepara os dados
         agora = datetime.now()
         data_str = agora.strftime("%d de %B")
         hora_str = agora.strftime("%H:%M")
-        clima = self.get_weather()
 
-        # 3. Monta a fala
-        texto_boas_vindas = (
-            f"Bem vindo senhor. Hoje é dia {data_str} e agora são {hora_str}, Previsão para hoje é {clima}. "
-            "Todos os sistemas estão operacionais. Aguardando suas instruções."
-        )
+        clima = await asyncio.to_thread(self.get_weather)
 
-        logger.info("Macro Executada: {}", texto_boas_vindas)
+        frases_restantes = [
+            f"Hoje é dia {data_str} e agora são {hora_str}.",
+            f"A previsão para hoje é {clima}.",
+            "Todos os sistemas estão operacionais.",
+            "Aguardando suas instruções."
+        ]
+
+        for frase in frases_restantes:
+            await self.brain.generate_and_queue_tts(frase)
         
-        # 4. Usa o cérebro da Mika para animar e falar!
-        self.brain.change_anim.emit("happy")
-        await self.brain.generate_and_queue_tts(texto_boas_vindas)
-        self.brain.memory.add_history("Macro de ativação executada", texto_boas_vindas)
+        texto_completo = "Bem vindo senhor. " + ' '.join(frases_restantes)
+        logger.info(f"Macro Executada: {texto_completo}")
 #_________________________________________________________________________________________________________________________

@@ -10,7 +10,7 @@ class SystemManager:
     def __init__(self):
         self.allower_powershell_commands = {
           "new-item", "get-childitem", "remove-item", 
-            "set-location", "write-output", "start-process"  
+            "set-location", "write-output", "start-process","winget"
         }
         self.powershell_aliases = {
             "ls": "get-childitem", "dir": "get-childitem",
@@ -41,7 +41,7 @@ class SystemManager:
 
         if cmd_base not in self.allower_powershell_commands:
             logger.warning(f"SystemManager: Comando PowerShell bloqueado por segurança: {cmd_base}")
-            return
+            return False
         
         logger.info(f"SystemManager: Executando Powershel: {command}")
         try:
@@ -52,8 +52,12 @@ class SystemManager:
 
             if result.returncode ==0:
                 logger.info(f"SystemManager: Sucesso: {result.stdout.strip()}")
+                return True
             else:
-                logger.error(f"SystemManager: Falha PS: {result.stderr.strip()}")
+                erro_msg = result.stderr.strip() if result.stderr.strip() else result.stdout.strip()
+                logger.error(f"SystemManager: Falha PS: {erro_msg}")
+                return False
 
         except Exception as erro:
             logger.error(f"SystemManager: erro critico no subprocess: {erro}")
+            return False

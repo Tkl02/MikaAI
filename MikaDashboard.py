@@ -7,6 +7,8 @@ from PyQt6.QtGui import QTextCursor
 from loguru import logger
 from mika_core.MikaWindows import MikaWindows
 from mika_core import MikaBrain
+from mika_core import MacroManager
+from mika_core import SystemManager
 
 NEON_MAGENTA = "#ff00ff"
 NEON_CYAN = "#00ffff"
@@ -119,6 +121,8 @@ class MikaDashboard(QMainWindow):
         if not self.mika_brain:
             logger.info("Iniciando cerebro da Mika ...")
             importlib.reload(MikaBrain)
+            importlib.reload(SystemManager)
+            importlib.reload(MacroManager)
             self.mika_brain = MikaBrain.MikaBrain(self.mika_windows)
             self.mika_brain.change_anim.connect(self.mika_windows.update_expression)
             self.mika_brain.change_talking_state.connect(self.mika_windows.set_talking)
