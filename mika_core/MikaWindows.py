@@ -1,59 +1,144 @@
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+import json
+from PyQt6.QtCore import Qt, QUrl, QSettings, QPoint
+from PyQt6.QtWidgets import QMainWindow,QVBoxLayout,QWidget
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtGui import QMouseEvent
 from mika_core.LocalMemoryManager import LocalMemoryManager
 from loguru import logger
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
+CONFIG_FILE = BASE_DIR / "mika_window_config.json"
 
 class MikaWindows(QMainWindow):
-    # classe que mostra a janela do VRM da mika simulando um "webBrowser"
     def __init__(self):
         super().__init__()
         self.memory_manager = LocalMemoryManager()
+        self.settings = QSettings("MikaAI","MikaAgent")
+        self.config = self.load_config()
+        self._drag_pos = QPoint()
         self.init_ui()
     
     def init_ui(self):
         self.setWindowTitle("Mika AI")
-        self.setFixedSize(300, 400)
 
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowFlag(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool
+        largura = self.config.get("window_width",300)
+        altura = self.config.get("window_height",400)
+        pos_x = self.config.get("window_x",100)
+        pos_y = self.config.get("window_y",100)
+
+        self.resize(largura,altura)
+        self.move(pos_x,pos_y)
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | 
+            Qt.WindowType.WindowStaysOnTopHint | 
+            Qt.WindowType.Tool
         )
 
         self.central_Widget = QWidget()
+        self.central_Widget.setStyleSheet("background: transparent;")
+        
         self.layout = QVBoxLayout(self.central_Widget)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.setCentralWidget(self.central_Widget)
 
         self.browser = QWebEngineView()
+        
+        self.browser.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.browser.setStyleSheet("background: transparent;")
         self.browser.page().setBackgroundColor(Qt.GlobalColor.transparent)
+        
         self.layout.addWidget(self.browser)
 
         logger.info("Janela da Mika pronta e aguardando renderização")
+        self.browser.loadFinished.connect(self.apply_saved_camera_settings)
         self.browser.setUrl(QUrl.fromLocalFile(str(INDEX_FILE)))
     
-    def update_vrm(self, expression):
-        self.browser.page().runJavaScript(f"changeMikaExpression('{expression}');")
+    def apply_saved_camera_settings(self):
+        zoom = self.config.get("camera_zoom",1.0)
+        foco = self.config.get("camera_focus", "head")
+        self.set_camera_zoom(zoom)
+        self.set_camera_focus(foco)
+        logger.info(f"Mikawindow: Configuração de camera aplicada")
+
+    def load_config(self):
+        default_config = {
+            "window_width":300,
+            "window_height":400,
+            "window_x":100,
+            "window_y":100,
+            "camera_zoom": 1.0,
+            "camera_focus": "head"
+            }
+        try:
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    return {**default_config, **json.load(f)} 
+        except Exception as erro:
+            logger.error(f"Mikawindows: Erro ao ler config.json: {erro}")
+        return default_config
+    
+    def save_config(self):
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.config,f,indent=4)
+        except Exception as e:
+            logger.error(f"Mikawindow: Erro ao salvar config: {e}")
+
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self.config["window_x"] = self.pos().x()
+        self.config["window_y"] = self.pos().y()
+        self.save_config()
+        logger.info(f"MikaWindows: Nova posição salva: {self.pos().x()}, {self.pos().y()}")
+        event.accept()
+
+    def update_window_size(self, width: int, height: int):
+        self.resize(width, height)
+        self.config["window_width"] = width
+        self.config["window_height"] = height
+        self.save_config()
+        logger.info(f"Mikaindows: proporção salva {width}x{height}.")
+    
+    def set_camera_focus(self, focus_type:str):
+        self.browser.page().runJavaScript(f"if (typeof setCameraFocus !== 'undefined') setCameraFocus('{focus_type}');")
+        self.config["camera_focus"] = focus_type
+        self.save_config()
+
+    def set_camera_zoom(self, zoom_multiplier: float):
+        self.browser.page().runJavaScript(f"if (typeof setZoom !== 'undefined') setZoom({zoom_multiplier});")
+        self.config["camera_zoom"] = zoom_multiplier
+        self.save_config()
     
     def update_expression(self, state):
-        js_code = f"changeMikaExpression('{state}');"
+        js_code = f"if (typeof changeMikaExpression !== 'undefined') changeMikaExpression('{state}');"
         self.browser.page().runJavaScript(js_code)
-        logger.info(f"Comando enviado ao VRM: {state}")
+        logger.info(f"Comando enviado ao vrm: {state}")
     
     def set_talking(self, is_talking: bool):
         if is_talking:
-            self.browser.page().runJavaScript("startTalking();")
+            self.browser.page().runJavaScript("if (typeof startTalking !== 'undefined') startTalking();")
         else:
-            self.browser.page().runJavaScript("stopTalking();")
+            self.browser.page().runJavaScript("if (typeof stopTalking !== 'undefined') stopTalking();")
     
     def load_vrm_viewer(self):
+        logger.info("Recarregando visualizador VRM")
         self.browser.setUrl(QUrl.fromLocalFile(str(INDEX_FILE)))
-
+    
     def closeEvent(self, event):
-        """Apenas fecha a janela de forma segura, sem derrubar o Dashboard."""
-        logger.info("Janela VRM fechada de forma segura.")
+        logger.info("Janela VRM fechada de forma segura")
         event.accept()

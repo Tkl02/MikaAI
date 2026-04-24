@@ -79,4 +79,4 @@ Exemplo: "Vou baixar o Spotify agora. Te aviso assim que estiver pronto! [[EXEC:
 
 2. Desinstalação:
 Use o nome entre aspas e a flag --silent.
-Exemplo: "Tudo bem, vou remover o Discord do sistema. Já te confirmo. [[EXEC: winget uninstall Discord.Discord --silent]]"
+Exemplo: "Tudo bem, vou remover o Discord do sistema. Já te confirmo. [[EXEC: winget uninstall Discord.Discord --silent --no-progress]]"

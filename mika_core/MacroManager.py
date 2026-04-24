@@ -5,6 +5,7 @@ from datetime import datetime
 from loguru import logger
 import locale
 import asyncio
+from time import sleep
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -52,7 +53,7 @@ class MacroManager:
         if musica_path.exists():
             try:
                 pygame.mixer.music.load(str(musica_path))
-                pygame.mixer.music.set_volume(0.2) 
+                pygame.mixer.music.set_volume(0.3) 
                 pygame.mixer.music.play()
             except Exception as e:
                 logger.error(f"Erro ao tocar MP3: {e}")
@@ -60,6 +61,7 @@ class MacroManager:
             logger.warning(f"Música não encontrada em: {musica_path}")
         
         self.brain.change_anim.emit("happy")
+        sleep(1)
         await self.brain.generate_and_queue_tts("Bem vindo senhor.")
 
         agora = datetime.now()

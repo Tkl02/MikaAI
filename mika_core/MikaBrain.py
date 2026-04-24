@@ -20,7 +20,7 @@ import sounddevice as sd
 import scipy.io.wavfile as wav
 import numpy as np
 import keyboard
-
+import speech_recognition as sr
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -33,6 +33,8 @@ class MikaBrain(QThread):
     change_anim = pyqtSignal(str)
     finished_speaking = pyqtSignal()
     change_talking_state = pyqtSignal(bool)
+    change_mode = pyqtSignal(str)
+
     def __init__(self, windows_ref):
         super().__init__()
         self._run_flag = True 
@@ -48,6 +50,14 @@ class MikaBrain(QThread):
         self.sys_manager = SystemManager()
         self.macro_manager = MacroManager(self)
 
+        # toggle mode
+        self.active_mode = "manual"
+        self.recognizer = sr.Recognizer()
+        self.recognizer.pause_threshold = 0.5
+        self.microphone = sr.Microphone()
+        self.stop_listenning = None
+
+        #temp audio init
         self.temp_dir = Path(__file__).resolve().parent / "temp_audio"
         self.ensure_temp_dir()
         self.cleanup_temp_files()
@@ -60,8 +70,55 @@ class MikaBrain(QThread):
         self.playback_thread = threading.Thread(target=self.audio_player_worker, daemon=True)
         self.playback_thread.start()
         
+        logger.info("MikaBrain: Modo de ativação carregado")
         logger.info("MikaBrain inicializado com sucesso (Edge TTS: Ava Multilingual)")
+    
+    def set_activation_mode(self, mode):
+        self.active_mode = mode
+        logger.info(f"MikaBrain: Mode de ativação alterado: {mode}")
+
+        if mode == "voice":
+            self.start_voice_detection()
+        else:
+            self.stop_voice_detection()
+    
+    def start_voice_detection(self):
+        with self.microphone as source:
+            self.recognizer.adjust_for_ambient_noise(source)
         
+        self.stop_listenning = self.recognizer.listen_in_background(self.microphone, self.callback_wake_word)
+        logger.info("MikaBrain: escuta de voz ativada. Pode me chamar!")
+
+    def stop_voice_detection(self):
+        if self.stop_listenning:
+            self.stop_listenning(wait_for_stop=False)
+            self.stop_listenning=None
+            logger.info("Mikabrain: Escuta de voz desativada")
+
+    def callback_wake_word(self, recognizer, audio):
+        if self.active_mode != "voice" or self.is_recording or self.is_speaking:
+            return
+
+        try:
+            speech = recognizer.recognize_google(audio, language="pt-BR").lower()
+            if "mica" in speech or "mika" in speech:
+                logger.info("Mika: Ouvi meu nome! Ativando ...")
+                comando = speech.replace('mica','').replace('mika','').strip()
+                if len(comando) >2:
+                    temp_wav = self.temp_dir / f"user_{uuid.uuid4().hex[:8]}.wav"
+                    with open(temp_wav, "wb") as f:
+                        f.write(audio.get_wav_data())
+                    threading.Thread(
+                        target= lambda f=str(temp_wav): asyncio.run(self.process_full_cycle(f)), 
+                        daemon=True).start()
+                else:
+                    logger.info("Apenas o nome foi dito. Abrindo o microfone para perguntar")
+                    self.handle_key_press(None)
+                    time.sleep(5)
+                    self.handle_key_release(None)
+        except Exception:
+            pass
+
     def load_context_file(self):
         try:
             base_path = Path(__file__).resolve().parent
@@ -95,13 +152,15 @@ class MikaBrain(QThread):
     def stop(self):
         self._run_flag = False
         self.audio_queue.put(None)
+        self.stop_voice_detection()
     
     def audio_player_worker(self):
         """Thread separada que toca a fila de áudios em MP3 sem GAPs"""
         
         # Reservamos um canal específico para a voz da Mika.
         # A música da macro já usa o mixer.music, então não haverá conflito.
-        canal = pygame.mixer.Channel(1) 
+        canal = pygame.mixer.Channel(1)
+        boca_aberta =False
         
         while True:
             try:
@@ -112,6 +171,10 @@ class MikaBrain(QThread):
                 if filepath is None:
                     logger.info("Thread de áudio encerrada com segurança.")
                     break
+                    
+                if not boca_aberta:
+                    self.change_talking_state.emit(True)
+                    boca_aberta = True
 
                 self.change_talking_state.emit(True) 
                 
@@ -147,6 +210,7 @@ class MikaBrain(QThread):
                 # Se a fila esvaziou e o canal parou de tocar, a Mika parou de falar.
                 if not canal.get_busy():
                     self.change_talking_state.emit(False)
+                    boca_aberta = False
 
     async def generate_and_queue_tts(self, text):
         """Gera o áudio com Edge TTS e adiciona na fila de reprodução"""

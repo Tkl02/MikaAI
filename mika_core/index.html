@@ -14,6 +14,8 @@
             width: 100vw;
             height: 100vh;
             background: transparent;
+            display: block;
+            /* Remove margens extras do canvas */
         }
     </style>
 </head>
@@ -40,8 +42,24 @@
         document.body.appendChild(renderer.domElement);
 
         const scene = new THREE.Scene();
+
+        // --- CÂMERA E TRANSIÇÕES (LERP) ---
         const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20.0);
-        camera.position.set(0.0, 1.4, 1.5);
+
+        // Posições pré-definidas (Posição da câmera e para onde ela olha)
+        const cameraTargets = {
+            'head': { pos: new THREE.Vector3(0.0, 1.45, 0.8), look: new THREE.Vector3(0.0, 1.45, 0.0) },
+            'torso': { pos: new THREE.Vector3(0.0, 1.1, 1.6), look: new THREE.Vector3(0.0, 1.1, 0.0) },
+            'fullbody': { pos: new THREE.Vector3(0.0, 0.8, 2.8), look: new THREE.Vector3(0.0, 0.8, 0.0) }
+        };
+
+        let targetCameraPos = cameraTargets['head'].pos.clone();
+        let targetCameraLook = cameraTargets['head'].look.clone();
+        let currentCameraLook = cameraTargets['head'].look.clone();
+        let targetFov = 30; // FOV base
+
+        camera.position.copy(targetCameraPos);
+        camera.lookAt(currentCameraLook);
 
         const light = new THREE.DirectionalLight(0xffffff, 1.0);
         light.position.set(1.0, 1.0, 1.0).normalize();
@@ -51,24 +69,67 @@
         const loader = new GLTFLoader();
         loader.register((parser) => new VRMLoaderPlugin(parser));
 
-        loader.load('./Mika-0.vrm', (gltf) => {
-            const vrm = gltf.userData.vrm;
-            scene.add(vrm.scene);
-            currentVrm = vrm;
-            vrm.scene.rotation.y = Math.PI;
-            const leftArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
-            const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+        // --- GESTÃO DE MEMÓRIA E CARREGAMENTO DE VRM ---
+        window.loadNewVRM = (url) => {
+            loader.load(url, (gltf) => {
+                // Limpeza estrita da GPU para o modelo antigo
+                if (currentVrm) {
+                    scene.remove(currentVrm.scene);
+                    currentVrm.scene.traverse((child) => {
+                        if (child.isMesh) {
+                            child.geometry.dispose();
+                            if (child.material) {
+                                if (Array.isArray(child.material)) {
+                                    child.material.forEach(m => { if (m.map) m.map.dispose(); m.dispose(); });
+                                } else {
+                                    if (child.material.map) child.material.map.dispose();
+                                    child.material.dispose();
+                                }
+                            }
+                        }
+                    });
+                }
 
-            if (leftArm) {
-                leftArm.rotation.z = 1.3;
+                const vrm = gltf.userData.vrm;
+                scene.add(vrm.scene);
+                currentVrm = vrm;
+                vrm.scene.rotation.y = Math.PI;
+
+                // Abaixa os braços para posição relaxada
+                const leftArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+                const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+                if (leftArm) leftArm.rotation.z = 1.3;
+                if (rightArm) rightArm.rotation.z = -1.3;
+
+                console.log("VRM Renderizado com sucesso!");
+            });
+        };
+
+        // Carrega o modelo padrão ao abrir a janela
+        // Adicionamos um timestamp no final para quebrar o cache do navegador caso o arquivo físico mude
+        window.loadNewVRM('./Mika-0.vrm?t=' + new Date().getTime());
+
+        // --- FUNÇÕES GLOBAIS DE CONTROLE DA CÂMERA ---
+        window.setCameraFocus = (type) => {
+            if (cameraTargets[type]) {
+                targetCameraPos.copy(cameraTargets[type].pos);
+                targetCameraLook.copy(cameraTargets[type].look);
             }
-            if (rightArm) {
-                rightArm.rotation.z = -1.3;
-            }
-            console.log("VRM Carregado!");
+        };
+
+        window.setZoom = (zoomMultiplier) => {
+            // Zoom multiplicador (1.0 = normal, 2.0 = 2x mais perto, 0.5 = afastado)
+            targetFov = 30 / Math.max(0.1, zoomMultiplier);
+        };
+
+        // Responsividade caso o usuário mude o tamanho da janela no Python
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
         });
 
-        // Controle de Expressões
+        // --- EXPRESSÕES E FALA (MANTIDO DO ORIGINAL) ---
         window.changeMikaExpression = (state) => {
             if (!currentVrm) return;
             const s = currentVrm.expressionManager;
@@ -81,7 +142,6 @@
             if (state === 'sad') s.setValue(VRMExpressionPresetName.Sorrow, 1);
         };
 
-        // --- NOVO: Controle de Fala ---
         let isTalking = false;
         let talkTimer = 0;
 
@@ -89,7 +149,6 @@
         window.stopTalking = () => {
             isTalking = false;
             if (currentVrm) {
-                // Fecha a boca ao parar de falar
                 currentVrm.expressionManager.setValue(VRMExpressionPresetName.Aa, 0);
                 currentVrm.expressionManager.setValue(VRMExpressionPresetName.Ih, 0);
                 currentVrm.expressionManager.setValue(VRMExpressionPresetName.Ou, 0);
@@ -102,23 +161,30 @@
             requestAnimationFrame(animate);
             const delta = clock.getDelta();
 
+            // Interpolação Linear (LERP) para movimento super suave da Câmera
+            camera.position.lerp(targetCameraPos, 0.05);
+            currentCameraLook.lerp(targetCameraLook, 0.05);
+            camera.lookAt(currentCameraLook);
+
+            // LERP suave do Zoom (FOV)
+            camera.fov += (targetFov - camera.fov) * 0.08;
+            camera.updateProjectionMatrix();
+
             if (currentVrm) {
                 currentVrm.update(delta);
                 const time = Date.now();
                 const s = currentVrm.expressionManager;
 
-                // 1. Movimento Ocioso (Idle Sway) - Cabeça e Pescoço respirando
                 const neck = currentVrm.humanoid.getNormalizedBoneNode('neck');
                 const spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
                 if (neck && spine) {
-                    neck.rotation.x = Math.sin(time * 0.001) * 0.02; // Move a cabeça pra cima/baixo
-                    neck.rotation.y = Math.cos(time * 0.0008) * 0.03; // Olha levemente pros lados
-                    spine.rotation.z = Math.sin(time * 0.0005) * 0.01; // Balanço do tronco
+                    neck.rotation.x = Math.sin(time * 0.001) * 0.02;
+                    neck.rotation.y = Math.cos(time * 0.0008) * 0.03;
+                    spine.rotation.z = Math.sin(time * 0.0005) * 0.01;
                 }
 
-                // 2. Sistema de Piscar Olhos (Blink Automático)
-                const blinkFreq = 4000; // Pisca a cada ~4 segundos
-                const blinkDuration = 150; // Velocidade da piscada
+                const blinkFreq = 4000;
+                const blinkDuration = 150;
                 const timeMod = time % blinkFreq;
                 if (timeMod < blinkDuration) {
                     const blinkValue = Math.sin((timeMod / blinkDuration) * Math.PI);
@@ -126,15 +192,13 @@
                 } else {
                     s.setValue(VRMExpressionPresetName.Blink, 0);
                 }
-                // 3. Simulação de Fala (Lip Sync Aleatório)
+
                 if (isTalking) {
                     talkTimer += delta;
-                    if (talkTimer > 0.08) { // Muda o formato da boca a cada 80ms
+                    if (talkTimer > 0.08) {
                         talkTimer = 0;
                         const vowels = [VRMExpressionPresetName.Aa, VRMExpressionPresetName.Ih, VRMExpressionPresetName.Ou];
-                        // Zera todas
                         vowels.forEach(v => s.setValue(v, 0));
-                        // Escolhe uma vogal aleatória e aplica uma força aleatória
                         const randVowel = vowels[Math.floor(Math.random() * vowels.length)];
                         s.setValue(randVowel, Math.random() * 0.6 + 0.2);
                     }
