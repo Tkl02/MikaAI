@@ -1,8 +1,8 @@
 {
-    "window_width": 292,
-    "window_height": 861,
-    "window_x": 100,
-    "window_y": 100,
+    "window_width": 257,
+    "window_height": 338,
+    "window_x": -1900,
+    "window_y": 752,
     "camera_zoom": 0.8,
-    "camera_focus": "fullbody"
+    "camera_focus": "head"
 }

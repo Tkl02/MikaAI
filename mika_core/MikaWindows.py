@@ -1,5 +1,5 @@
 import json
-from PyQt6.QtCore import Qt, QUrl, QSettings, QPoint
+from PyQt6.QtCore import Qt, QUrl, QSettings, QPoint, QEvent
 from PyQt6.QtWidgets import QMainWindow,QVBoxLayout,QWidget
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtGui import QMouseEvent
@@ -17,7 +17,10 @@ class MikaWindows(QMainWindow):
         self.memory_manager = LocalMemoryManager()
         self.settings = QSettings("MikaAI","MikaAgent")
         self.config = self.load_config()
-        self._drag_pos = QPoint()
+        self._drag_start_global = None
+        self._window_start_pos = QPoint()
+        self._is_dragging = False
+        self._drag_filter_targets = set()
         self.init_ui()
     
     def init_ui(self):
@@ -53,6 +56,7 @@ class MikaWindows(QMainWindow):
         self.browser.page().setBackgroundColor(Qt.GlobalColor.transparent)
         
         self.layout.addWidget(self.browser)
+        self._setup_drag_event_filters()
 
         logger.info("Janela da Mika pronta e aguardando renderização")
         self.browser.loadFinished.connect(self.apply_saved_camera_settings)
@@ -63,7 +67,66 @@ class MikaWindows(QMainWindow):
         foco = self.config.get("camera_focus", "head")
         self.set_camera_zoom(zoom)
         self.set_camera_focus(foco)
+        self._setup_drag_event_filters()
         logger.info(f"Mikawindow: Configuração de camera aplicada")
+
+    def _register_drag_filter(self, widget):
+        if not widget:
+            return
+        widget_id = id(widget)
+        if widget_id in self._drag_filter_targets:
+            return
+        widget.installEventFilter(self)
+        self._drag_filter_targets.add(widget_id)
+
+    def _setup_drag_event_filters(self):
+        self._register_drag_filter(self)
+        self._register_drag_filter(self.central_Widget)
+        self._register_drag_filter(self.browser)
+        for child in self.browser.findChildren(QWidget):
+            self._register_drag_filter(child)
+
+    def _save_window_position(self):
+        self.config["window_x"] = self.pos().x()
+        self.config["window_y"] = self.pos().y()
+        self.save_config()
+        logger.info(f"MikaWindows: Nova posição salva: {self.pos().x()}, {self.pos().y()}")
+
+    def _handle_drag_event(self, event: QMouseEvent):
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_global = event.globalPosition().toPoint()
+            self._window_start_pos = self.pos()
+            self._is_dragging = False
+            return False
+
+        if event.type() == QEvent.Type.MouseMove and self._drag_start_global is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            delta = event.globalPosition().toPoint() - self._drag_start_global
+            if not self._is_dragging and delta.manhattanLength() >= 3:
+                self._is_dragging = True
+            if self._is_dragging:
+                self.move(self._window_start_pos + delta)
+                return True
+            return False
+
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            was_dragging = self._is_dragging
+            self._drag_start_global = None
+            self._is_dragging = False
+            if was_dragging:
+                self._save_window_position()
+                return True
+        return False
+
+    def eventFilter(self, source, event):
+        if isinstance(source, QWidget) and (source is self or self.isAncestorOf(source)):
+            if event.type() in {
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseMove,
+                QEvent.Type.MouseButtonRelease,
+            }:
+                if self._handle_drag_event(event):
+                    return True
+        return super().eventFilter(source, event)
 
     def load_config(self):
         default_config = {
@@ -91,21 +154,19 @@ class MikaWindows(QMainWindow):
 
 
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
+        if self._handle_drag_event(event):
+            return
+        super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event: QMouseEvent):
-        if event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-            event.accept()
+        if self._handle_drag_event(event):
+            return
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        self.config["window_x"] = self.pos().x()
-        self.config["window_y"] = self.pos().y()
-        self.save_config()
-        logger.info(f"MikaWindows: Nova posição salva: {self.pos().x()}, {self.pos().y()}")
-        event.accept()
+        if self._handle_drag_event(event):
+            return
+        super().mouseReleaseEvent(event)
 
     def update_window_size(self, width: int, height: int):
         self.resize(width, height)
